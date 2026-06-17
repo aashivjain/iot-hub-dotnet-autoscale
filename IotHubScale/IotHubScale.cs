@@ -8,6 +8,7 @@ using Microsoft.Azure.Management.IotHub.Models;
 using Microsoft.Rest;
 using Microsoft.IdentityModel.Clients.ActiveDirectory;
 using Microsoft.Rest.Azure;
+using IotHubScale.Core;
 
 namespace IotHubScale
 {
@@ -106,43 +107,32 @@ namespace IotHubScale
                 return;
             }
 
-            // compute the desired message threshold for the current sku
-            long messageLimit = GetSkuUnitThreshold(desc.Sku.Name, desc.Sku.Capacity, ThresholdPercentage);
+            ScaleDecision decision = ScaleLogic.EvaluateScale(currentSKU, currentUnits, currentMessageCount, ThresholdPercentage);
 
             log.Info("Current SKU Tier: " + desc.Sku.Tier);
-            log.Info("Current SKU Name: " + currentSKU);
-            log.Info("Current SKU Capacity: " + currentUnits.ToString());
-            log.Info("Current Message Count:  " + currentMessageCount.ToString());
-            log.Info("Current Sku/Unit Message Threshold:  " + messageLimit);
+            log.Info("Current SKU Name: " + decision.CurrentSku);
+            log.Info("Current SKU Capacity: " + decision.CurrentUnits.ToString());
+            log.Info("Current Message Count:  " + decision.CurrentMessageCount.ToString());
+            log.Info("Current Sku/Unit Message Threshold:  " + decision.MessageLimit);
 
-            // if we are below the threshold, nothing to do, bail
-            if (currentMessageCount < messageLimit)
+            if (!decision.ShouldScale)
             {
-                log.Info(String.Format("Current message count of {0} is less than the threshold of {1}. Nothing to do", currentMessageCount.ToString(), messageLimit));
+                log.Info(decision.Reason);
                 return;
             }
-            else 
-                log.Info(String.Format("Current message count of {0} is over the threshold of {1}. Need to scale IotHub", currentMessageCount.ToString(), messageLimit));
 
-            // figure out what new sku level and 'units' we need to scale to
-            string newSkuName = desc.Sku.Name;
-            long newSkuUnits = GetScaleUpTarget(desc.Sku.Name, desc.Sku.Capacity);
-            if (newSkuUnits < 0)
-            {
-                log.Error("Unable to determine new scale units for IoTHub (perhaps you are already at the highest units for a tier?)");
-                return;
-            }
+            log.Info(decision.Reason);
 
             // update the IoT Hub description with the new sku level and units
-            desc.Sku.Name = newSkuName;
-            desc.Sku.Capacity = newSkuUnits;
+            desc.Sku.Name = decision.TargetSku;
+            desc.Sku.Capacity = decision.TargetUnits;
 
             // scale the IoT Hub by submitting the new configuration (tier and units)
             DateTime dtStart = DateTime.Now;
             client.IotHubResource.CreateOrUpdate(ResourceGroupName, IotHubName, desc);
             TimeSpan ts = new TimeSpan(DateTime.Now.Ticks - dtStart.Ticks);
 
-            log.Info(String.Format("Updated IoTHub {0} from {1}-{2} to {3}-{4} in {5} seconds", IotHubName, currentSKU, currentUnits, newSkuName, newSkuUnits, ts.Seconds));
+            log.Info(String.Format("Updated IoTHub {0} from {1}-{2} to {3}-{4} in {5} seconds", IotHubName, currentSKU, currentUnits, decision.TargetSku, decision.TargetUnits, ts.Seconds));
 
             //  this would be a good place to send notifications that you scaled up the hub :-)
         }
@@ -167,46 +157,5 @@ namespace IotHubScale
         }
 
         // get the new sku/units target for scaling the IoT Hub
-        public static long GetScaleUpTarget(string currentSku, long currentUnits)
-        {
-            switch (currentSku)
-            {
-                case "S1":
-                    if (currentUnits <= 199)  // 200 units is the maximum for S1 without involving Azure support
-                        return currentUnits++;
-                    else
-                        return -1;
-                case "S2":
-                    if (currentUnits <= 199)  // 200 units is the maximum for S2 without involving Azure support
-                        return currentUnits++;
-                    else
-                        return -1;
-                case "S3":
-                    if (currentUnits <= 9)  // can't have more than 10 S3 units without involving Azure support
-                        return currentUnits++;
-                    else
-                        return -1;
-            }
-            return -1;   // shouldn't get here unless an invalid Sku was specified
-        }
-
-        // get the number of messages/day for the sku/unit/threshold combination
-        public static long GetSkuUnitThreshold(string sku, long units, int percent)
-        {
-            long multiplier = 0;
-            switch (sku)
-            {
-                case "S1":
-                    multiplier = 400000;
-                    break;
-                case "S2":
-                    multiplier = 6000000;
-                    break;
-                case "S3":
-                    multiplier = 300000000;
-                    break;
-            }
-            return (long)(multiplier * units * percent) / 100;
-        }
     }
 }
